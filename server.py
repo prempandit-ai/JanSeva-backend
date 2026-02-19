@@ -17,9 +17,9 @@ from pymongo.errors import PyMongoError
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-mongo_url = os.environ['mongodb+srv://panditprem2711_db_user:UWxFW45afJMamk6r@cluster0.hr6x7ay.mongodb.net/?appName=Cluster0']
+mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['test_database']]
+db = client[os.environ['DB_NAME']]
 
 JWT_SECRET = os.environ.get('JWT_SECRET', 'your-secret-key-change-in-production')
 JWT_ALGORITHM = 'HS256'

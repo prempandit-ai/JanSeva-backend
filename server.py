@@ -12,16 +12,23 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import bcrypt
 import jwt
+from pymongo.errors import PyMongoError
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-mongo_url = os.environ['MONGO_URL']
+mongo_url = os.environ['mongodb+srv://panditprem2711_db_user:UWxFW45afJMamk6r@cluster0.hr6x7ay.mongodb.net/?appName=Cluster0']
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ['test_database']]
 
 JWT_SECRET = os.environ.get('JWT_SECRET', 'your-secret-key-change-in-production')
 JWT_ALGORITHM = 'HS256'
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -228,32 +235,50 @@ def check_eligibility(quiz: QuizSubmission, scheme: dict) -> bool:
 
 @api_router.post("/auth/signup")
 async def signup(user_data: UserCreate):
-    existing = await db.users.find_one({"email": user_data.email}, {"_id": 0})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    user_id = str(uuid.uuid4())
-    user_doc = {
-        "id": user_id,
-        "email": user_data.email,
-        "password": hash_password(user_data.password),
-        "name": user_data.name,
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
-    
-    await db.users.insert_one(user_doc)
-    token = create_token(user_id, user_data.email)
-    
-    return {"token": token, "user": {"id": user_id, "email": user_data.email, "name": user_data.name}}
+    try:
+        existing = await db.users.find_one({"email": user_data.email}, {"_id": 0})
+        if existing:
+            raise HTTPException(status_code=400, detail="Email already registered")
+
+        user_id = str(uuid.uuid4())
+        user_doc = {
+            "id": user_id,
+            "email": user_data.email,
+            "password": hash_password(user_data.password),
+            "name": user_data.name,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        await db.users.insert_one(user_doc)
+        token = create_token(user_id, user_data.email)
+
+        return {"token": token, "user": {"id": user_id, "email": user_data.email, "name": user_data.name}}
+    except HTTPException:
+        raise
+    except PyMongoError as exc:
+        logger.error("Signup database error: %s", str(exc))
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    except Exception as exc:
+        logger.error("Signup unexpected error: %s", str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @api_router.post("/auth/login")
 async def login(credentials: UserLogin):
-    user = await db.users.find_one({"email": credentials.email}, {"_id": 0})
-    if not user or not verify_password(credentials.password, user['password']):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    token = create_token(user['id'], user['email'])
-    return {"token": token, "user": {"id": user['id'], "email": user['email'], "name": user['name']}}
+    try:
+        user = await db.users.find_one({"email": credentials.email}, {"_id": 0})
+        if not user or not verify_password(credentials.password, user['password']):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        token = create_token(user['id'], user['email'])
+        return {"token": token, "user": {"id": user['id'], "email": user['email'], "name": user['name']}}
+    except HTTPException:
+        raise
+    except PyMongoError as exc:
+        logger.error("Login database error: %s", str(exc))
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    except Exception as exc:
+        logger.error("Login unexpected error: %s", str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @api_router.post("/quiz/submit")
 async def submit_quiz(quiz: QuizSubmission, user: dict = Depends(get_current_user)):
@@ -327,20 +352,45 @@ async def unsave_scheme(scheme_id: str, user: dict = Depends(get_current_user)):
 
 app.include_router(api_router)
 
+def parse_cors_origins(raw_origins: Optional[str]) -> List[str]:
+    """Normalize comma-separated origins from env for deterministic CORS behavior."""
+    if not raw_origins:
+        return [
+            "https://jan-seva-frontend.vercel.app",
+            "http://localhost:3000",
+        ]
+
+    parsed_origins = []
+    for origin in raw_origins.split(","):
+        normalized = origin.strip().strip('"').strip("'").rstrip("/")
+        if normalized:
+            parsed_origins.append(normalized)
+
+    return parsed_origins or [
+        "https://jan-seva-frontend.vercel.app",
+        "http://localhost:3000",
+    ]
+
+cors_origins = parse_cors_origins(os.environ.get("CORS_ORIGINS"))
+logger.info("Configured CORS origins: %s", cors_origins)
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+@app.on_event("startup")
+async def startup_db_check():
+    """Log DB connectivity at startup so deployment issues are visible in logs."""
+    try:
+        await db.command("ping")
+        logger.info("MongoDB ping successful")
+    except Exception as exc:
+        logger.error("MongoDB ping failed: %s", str(exc))
